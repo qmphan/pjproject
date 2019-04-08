@@ -422,6 +422,7 @@ static pj_status_t ca_factory_refresh(pjmedia_aud_dev_factory *f)
     PJ_UNUSED_ARG(f);
     return PJ_SUCCESS;
 #else
+    pj_status_t ret = PJ_SUCCESS;
     struct coreaudio_factory *cf = (struct coreaudio_factory*)f;
     unsigned i;
     unsigned dev_count;
@@ -430,6 +431,8 @@ static pj_status_t ca_factory_refresh(pjmedia_aud_dev_factory *f)
     UInt32 buf_size, dev_size, size = sizeof(AudioDeviceID);
     AudioBufferList *buf = NULL;
     OSStatus ostatus;
+
+    pj_mutex_lock(cf->mutex);
 
     if (cf->pool != NULL) {
 	pj_pool_release(cf->pool);
@@ -459,17 +462,20 @@ static pj_status_t ca_factory_refresh(pjmedia_aud_dev_factory *f)
   	 * think that the core audio backend initialization is successful,
   	 * regardless there is no audio device installed, as later application
   	 * can check it using get_dev_count().
-  	return PJMEDIA_EAUD_NODEV;
+  	ret = PJMEDIA_EAUD_NODEV;
+	goto exit;
   	 */
-  	return PJ_SUCCESS;
+  	goto exit;
     }
     PJ_LOG(4, (THIS_FILE, "core audio detected %d devices",
 	       dev_count));
 
     /* Get all the audio device IDs */
     dev_ids = (AudioDeviceID *)pj_pool_calloc(cf->pool, dev_count, size);
-    if (!dev_ids)
-	return PJ_ENOMEM;
+    if (!dev_ids) {
+	ret = PJ_ENOMEM;
+	goto exit;
+    }
     ostatus = AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr,
 					 0, NULL,
 				         &dev_size, (void *)dev_ids);
@@ -477,7 +483,8 @@ static pj_status_t ca_factory_refresh(pjmedia_aud_dev_factory *f)
 	/* This should not happen since we have successfully retrieved
 	 * the property data size before
 	 */
-	return PJMEDIA_EAUD_INIT;
+	ret = PJMEDIA_EAUD_INIT;
+	goto exit;
     }
     
     if (dev_size > 1) {
@@ -642,15 +649,21 @@ static pj_status_t ca_factory_refresh(pjmedia_aud_dev_factory *f)
 	       cdi->info.default_samples_per_sec));
     }
 
-    return PJ_SUCCESS;
+exit:
+    pj_mutex_unlock(cf->mutex);
+    return ret;
 #endif
 }
 
 /* API: get number of devices */
 static unsigned ca_factory_get_dev_count(pjmedia_aud_dev_factory *f)
 {
+    unsigned ret;
     struct coreaudio_factory *cf = (struct coreaudio_factory*)f;
-    return cf->dev_count;
+    pj_mutex_lock(cf->mutex);
+    ret = cf->dev_count;
+    pj_mutex_unlock(cf->mutex);
+    return ret;
 }
 
 /* API: get device info */
@@ -659,10 +672,11 @@ static pj_status_t ca_factory_get_dev_info(pjmedia_aud_dev_factory *f,
 					   pjmedia_aud_dev_info *info)
 {
     struct coreaudio_factory *cf = (struct coreaudio_factory*)f;
-
+    pj_mutex_lock(cf->mutex);
     PJ_ASSERT_RETURN(index < cf->dev_count, PJMEDIA_EAUD_INVDEV);
 
     pj_memcpy(info, &cf->dev_info[index].info, sizeof(*info));
+    pj_mutex_unlock(cf->mutex);
 
     return PJ_SUCCESS;
 }
@@ -672,8 +686,11 @@ static pj_status_t ca_factory_default_param(pjmedia_aud_dev_factory *f,
 					    unsigned index,
 					    pjmedia_aud_param *param)
 {
+    pj_status_t ret = PJ_SUCCESS;
     struct coreaudio_factory *cf = (struct coreaudio_factory*)f;
     struct coreaudio_dev_info *di = &cf->dev_info[index];
+
+    pj_mutex_lock(cf->mutex);
 
     PJ_ASSERT_RETURN(index < cf->dev_count, PJMEDIA_EAUD_INVDEV);
 
@@ -691,7 +708,8 @@ static pj_status_t ca_factory_default_param(pjmedia_aud_dev_factory *f,
 	param->play_id = index;
 	param->rec_id = PJMEDIA_AUD_INVALID_DEV;
     } else {
-	return PJMEDIA_EAUD_INVDEV;
+	ret = PJMEDIA_EAUD_INVDEV;
+	goto exit;
     }
 
     /* Set the mandatory settings here */
@@ -706,7 +724,9 @@ static pj_status_t ca_factory_default_param(pjmedia_aud_dev_factory *f,
     param->input_latency_ms = PJMEDIA_SND_DEFAULT_REC_LATENCY;
     param->output_latency_ms = PJMEDIA_SND_DEFAULT_PLAY_LATENCY;
 
-    return PJ_SUCCESS;
+exit:
+    pj_mutex_unlock(cf->mutex);
+    return ret;
 }
 
 OSStatus resampleProc(AudioConverterRef             inAudioConverter,
