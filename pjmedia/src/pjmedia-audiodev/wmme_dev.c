@@ -84,6 +84,7 @@ struct wmme_factory
     pj_pool_t			*base_pool;
     pj_pool_t			*pool;
     pj_pool_factory		*pf;
+    pj_mutex_t			*mutex;
 
     unsigned			 dev_count;
     struct wmme_dev_info	*dev_info;
@@ -255,6 +256,8 @@ static void get_dev_names(pjmedia_aud_dev_factory *f)
     if (FAILED(hr))
 	goto on_error;
 
+    pj_mutex_lock(wf->mutex);
+
     for (nDevice = 0; nDevice < cDevices; ++nDevice) {
 	IMMDevice      *pDevice = NULL;
 	IPropertyStore *pProps = NULL;
@@ -301,6 +304,7 @@ static void get_dev_names(pjmedia_aud_dev_factory *f)
     }
 
 on_error:
+    pj_mutex_unlock(wf->mutex);
     if (pDevices)
 	hr = IMMDeviceCollection_Release(pDevices);
 
@@ -390,6 +394,14 @@ static void build_dev_info(UINT deviceId, struct wmme_dev_info *wdi,
 /* API: init factory */
 static pj_status_t factory_init(pjmedia_aud_dev_factory *f)
 {
+    struct wmme_factory *wf = (struct wmme_factory*)f;
+    status = pj_mutex_create_recursive(wf->base_pool,
+				       "wmmeeaudio",
+				       &wf->mutex);
+    if (status != PJ_SUCCESS) {
+	return status;
+    }
+
     pj_status_t ret = factory_refresh(f);
     if (ret != PJ_SUCCESS)
 	return ret;
@@ -401,11 +413,14 @@ static pj_status_t factory_init(pjmedia_aud_dev_factory *f)
 /* API: refresh the device list */
 static pj_status_t factory_refresh(pjmedia_aud_dev_factory *f)
 {
+    pj_status_t ret = PJ_SUCCESS;
     struct wmme_factory *wf = (struct wmme_factory*)f;
     unsigned c;
     int i;
     int inputDeviceCount, outputDeviceCount, devCount=0;
     pj_bool_t waveMapperAdded = PJ_FALSE;
+
+    pj_mutex_lock(wf->mutex); 
 
     if (wf->pool != NULL) {
 	pj_pool_release(wf->pool);
@@ -437,7 +452,7 @@ static pj_status_t factory_refresh(pjmedia_aud_dev_factory *f)
 	 * get_dev_count().
 	return PJMEDIA_EAUD_NODEV;
 	 */
-	return PJ_SUCCESS;
+        goto exit;
     }
 
     wf->dev_info = (struct wmme_dev_info*)
@@ -480,8 +495,10 @@ static pj_status_t factory_refresh(pjmedia_aud_dev_factory *f)
 
 	    mr = waveInGetDevCaps(uDeviceID, &wic, sizeof(WAVEINCAPS));
 
-	    if (mr == MMSYSERR_NOMEM)
-		return PJ_ENOMEM;
+	    if (mr == MMSYSERR_NOMEM) {
+		ret = PJ_ENOMEM;
+		goto exit;
+  	    }
 
 	    if (mr != MMSYSERR_NOERROR)
 		continue;
@@ -526,9 +543,10 @@ static pj_status_t factory_refresh(pjmedia_aud_dev_factory *f)
 
 	    mr = waveOutGetDevCaps(uDeviceID, &woc, sizeof(WAVEOUTCAPS));
 
-	    if (mr == MMSYSERR_NOMEM)
-		return PJ_ENOMEM;
-
+	    if (mr == MMSYSERR_NOMEM) {
+		ret = PJ_ENOMEM;
+		goto exit;
+	    }
 	    if (mr != MMSYSERR_NOERROR)
 		continue;
 
@@ -571,7 +589,9 @@ static pj_status_t factory_refresh(pjmedia_aud_dev_factory *f)
 	    wf->dev_info[c].info.output_count));
     }
 
-    return PJ_SUCCESS;
+exit:
+    pj_mutex_unlock(wf->mutex);
+    return ret;
 }
 
 /* API: destroy factory */
@@ -590,8 +610,12 @@ static pj_status_t factory_destroy(pjmedia_aud_dev_factory *f)
 /* API: get number of devices */
 static unsigned factory_get_dev_count(pjmedia_aud_dev_factory *f)
 {
+    unsigned ret;
     struct wmme_factory *wf = (struct wmme_factory*)f;
-    return wf->dev_count;
+    pj_mutex_lock(wf->mutex);
+    ret = wf->dev_count;
+    pj_mutex_unlock(wf->mutex);
+    return ret;
 }
 
 /* API: get device info */
@@ -600,10 +624,12 @@ static pj_status_t factory_get_dev_info(pjmedia_aud_dev_factory *f,
 					pjmedia_aud_dev_info *info)
 {
     struct wmme_factory *wf = (struct wmme_factory*)f;
+    pj_mutex_lock(wf->mutex);
 
     PJ_ASSERT_RETURN(index < wf->dev_count, PJMEDIA_EAUD_INVDEV);
-
     pj_memcpy(info, &wf->dev_info[index].info, sizeof(*info));
+
+    pj_mutex_unlock(wf->mutex);
 
     return PJ_SUCCESS;
 }
@@ -613,8 +639,11 @@ static pj_status_t factory_default_param(pjmedia_aud_dev_factory *f,
 					 unsigned index,
 					 pjmedia_aud_param *param)
 {
+    pj_status_t ret = PJ_SUCCESS;
     struct wmme_factory *wf = (struct wmme_factory*)f;
     struct wmme_dev_info *di = &wf->dev_info[index];
+
+    pj_mutex_lock(wf->mutex);
 
     PJ_ASSERT_RETURN(index < wf->dev_count, PJMEDIA_EAUD_INVDEV);
 
@@ -632,7 +661,8 @@ static pj_status_t factory_default_param(pjmedia_aud_dev_factory *f,
 	param->play_id = index;
 	param->rec_id = PJMEDIA_AUD_INVALID_DEV;
     } else {
-	return PJMEDIA_EAUD_INVDEV;
+	ret = PJMEDIA_EAUD_INVDEV;
+ 	goto exit;
     }
 
     param->clock_rate = di->info.default_samples_per_sec;
@@ -644,7 +674,9 @@ static pj_status_t factory_default_param(pjmedia_aud_dev_factory *f,
     param->input_latency_ms = PJMEDIA_SND_DEFAULT_REC_LATENCY;
     param->output_latency_ms = PJMEDIA_SND_DEFAULT_PLAY_LATENCY;
 
-    return PJ_SUCCESS;
+exit:
+    pj_mutex_unlock(wf->mutex);
+    return ret;
 }
 
 /* Internal: init WAVEFORMATEX */
@@ -714,27 +746,33 @@ static pj_status_t init_player_stream(  struct wmme_factory *wf,
 					const pjmedia_aud_param *prm,
 					unsigned buffer_count)
 {
+    pj_status_t ret;
     MMRESULT mr;
     WAVEFORMATEX wfx; 
     unsigned i, ptime;
     DWORD flag;
     pj_status_t status;
 
+    pj_mutex_lock(wf->mutex);
     PJ_ASSERT_RETURN(prm->play_id < (int)wf->dev_count, PJ_EINVAL);
 
     /*
      * Create a wait event.
      */
     wmme_strm->hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
-    if (NULL == wmme_strm->hEvent)
-	return pj_get_os_error();
+    if (NULL == wmme_strm->hEvent) {
+	ret = pj_get_os_error();
+	goto exit;
+    }
 
     /*
      * Set up wave format structure for opening the device.
      */
     status = init_waveformatex(&wfx, prm);
-    if (status != PJ_SUCCESS)
-	return status;
+    if (status != PJ_SUCCESS) {
+	ret = status;
+	goto exit;
+    }
 
     ptime = prm->samples_per_frame * 1000 / 
 	    (prm->clock_rate * prm->channel_count);
@@ -751,13 +789,15 @@ static pj_status_t init_player_stream(  struct wmme_factory *wf,
 		     wf->dev_info[prm->play_id].deviceId,
 		     &wfx, (DWORD_PTR)wmme_strm->hEvent, 0, flag);
     if (mr != MMSYSERR_NOERROR) {
-	return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr);
+	ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr);
+	goto exit;
     }
 
     /* Pause the wave out device */
     mr = waveOutPause(wmme_strm->hWave.Out);
     if (mr != MMSYSERR_NOERROR) {
-	return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr);
+	ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr);
+	goto exit;
     }
 
     /*
@@ -773,12 +813,14 @@ static pj_status_t init_player_stream(  struct wmme_factory *wf,
 				  &(wmme_strm->WaveHdr[i]),
 				  sizeof(WAVEHDR));
 	if (mr != MMSYSERR_NOERROR) {
-	    return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr); 
+	    ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr); 
+	    goto exit;
 	}
 	mr = waveOutWrite(wmme_strm->hWave.Out, &(wmme_strm->WaveHdr[i]), 
 			  sizeof(WAVEHDR));
 	if (mr != MMSYSERR_NOERROR) {
-	    return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr);
+	    ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_OUT(mr);
+	    goto exit;
 	}
     }
 
@@ -796,7 +838,9 @@ static pj_status_t init_player_stream(  struct wmme_factory *wf,
 	       prm->clock_rate, prm->channel_count, prm->samples_per_frame,
 	       prm->samples_per_frame * 1000 / prm->clock_rate));
 
-    return PJ_SUCCESS;
+exit:
+    pj_mutex_unlock(wf->mutex);
+    return ret;
 }
 
 
@@ -808,11 +852,13 @@ static pj_status_t init_capture_stream( struct wmme_factory *wf,
 					const pjmedia_aud_param *prm,
 					unsigned buffer_count)
 {
+    pj_status_t ret;
     MMRESULT mr;
     WAVEFORMATEX wfx; 
     DWORD flag;
     unsigned i, ptime;
 
+    pj_mutex_lock(wf->mutex);
     PJ_ASSERT_RETURN(prm->rec_id < (int)wf->dev_count, PJ_EINVAL);
 
     /*
@@ -820,7 +866,8 @@ static pj_status_t init_capture_stream( struct wmme_factory *wf,
     */
     wmme_strm->hEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
     if (NULL == wmme_strm->hEvent) {
-	return pj_get_os_error();
+	ret = pj_get_os_error();
+	goto exit;
     }
 
     /*
@@ -842,7 +889,8 @@ static pj_status_t init_capture_stream( struct wmme_factory *wf,
 		    wf->dev_info[prm->rec_id].deviceId, 
 		    &wfx, (DWORD_PTR)wmme_strm->hEvent, 0, flag);
     if (mr != MMSYSERR_NOERROR) {
-	return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_IN(mr);
+	ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_IN(mr);
+	goto exit;
     }
 
     /*
@@ -858,12 +906,14 @@ static pj_status_t init_capture_stream( struct wmme_factory *wf,
 				 &(wmme_strm->WaveHdr[i]),
 				 sizeof(WAVEHDR));
 	if (mr != MMSYSERR_NOERROR) {
-	    return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_IN(mr);
+	    ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_IN(mr);
+	    goto exit;
 	}
 	mr = waveInAddBuffer(wmme_strm->hWave.In, &(wmme_strm->WaveHdr[i]), 
 			     sizeof(WAVEHDR));
 	if (mr != MMSYSERR_NOERROR) {
-	    return PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_IN(mr);
+	    ret = PJMEDIA_AUDIODEV_ERRNO_FROM_WMME_IN(mr);
+	    goto error;
 	}
     }
 
@@ -881,7 +931,9 @@ static pj_status_t init_capture_stream( struct wmme_factory *wf,
 	prm->clock_rate, prm->channel_count, prm->samples_per_frame,
 	prm->samples_per_frame * 1000 / prm->clock_rate));
 
-    return PJ_SUCCESS;
+exit:
+    pj_mutex_unlock(wf->mutex);
+    return ret;
 }
 
 
