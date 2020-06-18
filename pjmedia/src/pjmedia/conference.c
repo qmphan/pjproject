@@ -982,6 +982,11 @@ PJ_DEF(pj_status_t) pjmedia_conf_connect_port( pjmedia_conf *conf,
     pj_bool_t start_sound = PJ_FALSE;
     unsigned i;
 
+
+    if (!conf || src_slot >= conf->max_ports || sink_slot >= conf->max_ports) {
+        return PJ_EINVAL;
+    }
+
     /* Check arguments */
     PJ_ASSERT_RETURN(conf && src_slot<conf->max_ports && 
 		     sink_slot<conf->max_ports, PJ_EINVAL);
