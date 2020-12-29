@@ -1112,7 +1112,7 @@ static pj_status_t match_offer(pj_pool_t *pool,
 
 	    pt = pj_strtoul(&master->desc.fmt[i]);
 	    
-	    if (pt < 96) {
+	    if (pt < 35) {
 		/* For static payload type, it's enough to compare just
 		 * the payload number.
 		 */
